@@ -1,7 +1,7 @@
 import uio
 
 class TBTerm(uio.IOBase):
-    def __init__( self, tft, font_regular, font_bold, rotation, bgcolor=0, fgcolor=7, readobj=None):
+    def __init__(self, tft, font_regular, font_bold, rotation, bgcolor=0, fgcolor=7, readobj=None):
         try:
             self.width = tft.width()
         except:
@@ -48,20 +48,6 @@ class TBTerm(uio.IOBase):
         
         # enable software scrolling on orientations that don't support hardware scrolling
         self.softscroll = self.rotation == 1 or self.rotation == 3
-
-    def _putc(self, _c):
-        c = chr(_c)
-        if c == "\n":
-            self._newline()
-        elif c == "\x08":
-            self._backspace()
-        elif c >= " ":
-            if self.softscroll:
-                self.current_line.append(_c)
-            self.tft.write( self.font_current, c, self.x * self.fwidth, self._abs2tft(self.y * self.fheight), self.fgcolor, self.bgcolor)
-            self.x += 1
-            if self.x >= self.cols:
-                self._newline()
 
     def _esq_read_num(self, buf, pos):
         digit = 1
@@ -129,6 +115,7 @@ class TBTerm(uio.IOBase):
                     self.bgansi = int(chr(buf[i]))+8
                     self.bgcolor = self._xterm_color(self.bgansi)
 
+
     def write(self, buf):
         self._draw_cursor(self.initial_bgcolor)
         i = 0
@@ -136,51 +123,69 @@ class TBTerm(uio.IOBase):
         while i < len(buf):
             c = buf[i]
 
-            if c == 0x1B:
+            if c == 0x0A: # new line
+                self._newline()
+            elif c == 0x08: # backspace
+                self._backspace()
+            elif c == 0x1B: # ESC
+                self.current_line.append(c)
                 i += 1
-                esc = i
-                
-                if self.softscroll:
-                    self.current_line.append(c)
 
                 while chr(buf[i]) in "[;0123456789":
+                    self.current_line.append(buf[i])
                     self.parse_ansi(buf, i)
-                    if self.softscroll:
-                        self.current_line.append(buf[i])
                     i += 1
-                    
+
                 c = buf[i]
 
-                if self.softscroll:
-                    self.current_line.append(c)
-                        
-                if c == 0x4B and i == esc + 1:  # ESC [ K
+                if c == 0x4B:  # ESC [ K (Erase in Line)
                     self._clear_cursor_eol()
-                elif c == 0x44:  # ESC [ n D
+                elif c == 0x44:  # ESC [ n D (Cursor Back)
                     for _ in range(self._esq_read_num(buf, i - 1)):
                         self._backspace()
-            else:
-                self._putc(c)
+                else:
+                    self.current_line.append(c)
+
+            elif chr(c) >= " ":
+                if self.softscroll:
+                    self.current_line.append(c)
+                self.tft.write(self.font_current, chr(c), self.x * self.fwidth, self._abs2tft(self.y * self.fheight), self.fgcolor, self.bgcolor)
+                self.x += 1
+                if self.x >= self.cols:
+                    self._newline()
+
             i += 1
         self._draw_cursor(self.fgcolor)
 
         return len(buf)
 
+
     def write_line(self, buf, y):
         i = 0
         x = 0
+	chr_buf = ""
 
         while i < len(buf):
             if buf[i] == 0x1B:
                 i += 1
 
+                if len(chr_buf) > 0:
+                    self.tft.write(self.font_current, chr_buf, x * self.fwidth, y * self.fheight, self.fgcolor, self.bgcolor)
+                    x += len(chr_buf)
+                    chr_buf = ""
+
                 while chr(buf[i]) in "[;0123456789":
                     self.parse_ansi(buf, i)
                     i += 1
             else:
-                self.tft.write(self.font_current, chr(buf[i]), x * self.fwidth, y * self.fheight, self.fgcolor, self.bgcolor)
-                x += 1
+                chr_buf += chr(buf[i])
+
             i += 1
+
+        if len(chr_buf) > 0:
+            self.tft.write(self.font_current, chr_buf, x * self.fwidth, y * self.fheight, self.fgcolor, self.bgcolor)
+
+
 
     def readinto(self, buf, nbytes=0):
         if self.readobj != None:
@@ -201,7 +206,7 @@ class TBTerm(uio.IOBase):
         if self.y >= self.rows:
             if self.softscroll:
                 # software scrolling based on buffered lines
-                self._fill_rect(0, 0, self.width, self.height, self.bgcolor)
+                self.tft.fill(self.bgcolor)
                 y = 0
                 self.lines_buffer = self.lines_buffer[-(self.height // self.fheight) + 1:]
                 for line in self.lines_buffer:
@@ -215,7 +220,7 @@ class TBTerm(uio.IOBase):
                     self.tft.vscsad(self.voffset)
                 elif self.rotation == 2:
                     self.tft.vscsad(self.height - self.voffset)
-                self._fill_rect( 0, self.height - self.fheight, self.width, self.fheight, self.bgcolor)
+                self._fill_rect(0, self.height - self.fheight, self.width, self.fheight, self.bgcolor)
                 self.y = self.rows - 1
         self.y_end = self.y
 
@@ -255,6 +260,22 @@ class TBTerm(uio.IOBase):
             i -= 1
         return hexa
 
+    def _char_at(self, x):
+        i = 0
+        j = 0
+        while i < len(self.current_line):
+            if self.current_line[i] == 0x1B:
+                while self.current_line[i] != 0x6D:
+                    i += 1
+
+            if j == x:
+                return chr(self.current_line[i])
+
+            i += 1
+            j += 1
+
+        return ' '
+
     def _backspace(self):
         if self.x == 0:
             if self.y > 0:
@@ -262,18 +283,23 @@ class TBTerm(uio.IOBase):
                 self.x = self.cols - 1
         else:
             self.x -= 1
-        self._fill_rect( self.x * self.fwidth, self.y * self.fheight, self.fwidth, self.fheight, self.bgcolor)
+
 
     def _clear_cursor_eol(self):
-        self._fill_rect( self.x * self.fwidth, self.y * self.fheight, self.width, self.fheight, self.bgcolor)
+        self._fill_rect(self.x * self.fwidth, self.y * self.fheight, self.width, self.fheight, self.bgcolor)
         for l in range(self.y + 1, self.y_end + 1):
             self._fill_rect(0, l * self.fheight, self.width, self.fheight, self.bgcolor)
         self.y_end = self.y
 
     def _draw_cursor(self, color):
-        self.tft.vline( self.x * self.fwidth, self._abs2tft(self.y * self.fheight), self.fheight, color)
+        self.tft.vline(self.x * self.fwidth, self._abs2tft(self.y * self.fheight), self.fheight, color)
 
     def _fill_rect(self, x, y, w, h, color):
+        if x + w > self.width:
+            w = self.width - x;
+        if y + h > self.height:
+            y = self.height - h;
+
         top = self._abs2tft(y)
         bottom = self._abs2tft(y + h)
         if bottom > top:
@@ -333,4 +359,5 @@ class TBTerm(uio.IOBase):
             rb = round(gray / 255 * 31)
             g = round(gray / 255 * 63)
             return (rb << 11 ) | (g << 5) | rb
+
 
